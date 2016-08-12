@@ -4,8 +4,8 @@
 #include "Precomp.h"
 
 #include <stdio.h>
-#include <string.h>
 #include <unistd.h>
+#include <string>
 
 #include "../../7z.h"
 #include "../../7zAlloc.h"
@@ -159,9 +159,6 @@ static SRes Utf16_To_Char(CBuf *buf, const UInt16 *s)
     return Utf16_To_Utf8Buf(buf, s, len);
 }
 
-#define ZIP_FULLPATH_MAX 512
-static char g7z_error_buf[100];
-
 static WRes MyCreateDir(char* fullPathBuff, char* targetDirEnd, const UInt16 *name)
 {
     CBuf buf;
@@ -177,7 +174,8 @@ static WRes MyCreateDir(char* fullPathBuff, char* targetDirEnd, const UInt16 *na
         res = mkdir(fullPathBuff, S_IRWXU | S_IRWXG | S_IRWXO) == 0 ? 0 : errno;
         if (res != 0)
         {
-            strerror_r(errno, g7z_error_buf, 99);
+            char g7z_error_buf[150];
+            strerror_r(errno, g7z_error_buf, 149);
             LOGE("create directory failed:%s  error:%s", fullPathBuff, g7z_error_buf);
         }
     }
@@ -201,7 +199,8 @@ static WRes OutFile_OpenUtf16(CSzFile *p,char* fullPathBuff, char* targetDirEnd,
     res = OutFile_Open(p, fullPathBuff);
     if (res != 0)
     {
-        strerror_r(errno, g7z_error_buf, 99);
+        char g7z_error_buf[150];
+        strerror_r(errno, g7z_error_buf, 149);
         LOGE("OutFile_OpenUtf16 failed:%s  error:%s", fullPathBuff, g7z_error_buf);
     }
     
@@ -209,19 +208,50 @@ static WRes OutFile_OpenUtf16(CSzFile *p,char* fullPathBuff, char* targetDirEnd,
     return res;
 }
 
-/*static SRes PrintString(const UInt16 *s)
+static std::string convertU16FileName(const UInt16 *s)
 {
+    std::string fileName;
     CBuf buf;
-    SRes res;
     Buf_Init(&buf);
-    res = Utf16_To_Char(&buf, s);
+    SRes res = Utf16_To_Char(&buf, s);
     if (res == SZ_OK)
-        LOGD("file name:%s", (const char *)buf.data);
+    {
+        fileName = (const char *)buf.data;
+    }
     Buf_Free(&buf, &g_Alloc);
-    return res;
-}*/
+    return fileName;
+}
 
-int extract7z(const char* inFile, const char* outPath)
+typedef enum {
+    EXTRACT_STATE_IDLE = 0,
+    EXTRACT_STATE_ERROR,
+    EXTRACT_STATE_EXTRACTING,
+    EXTRACT_STATE_COMPLETED,
+} ExtractState;
+
+//返回非0时中断解压
+typedef int(*Extract7zCallback)(int tag, float percent, ExtractState state, const char* message);
+
+static int DefaultExtract7zCallback(int tag, float percent, ExtractState state, const char* message)
+{
+    switch(state)
+    {
+        case EXTRACT_STATE_ERROR:
+            LOGE("%s", message);
+            break;
+        case EXTRACT_STATE_COMPLETED:
+            LOGD("Extract completed\n");
+            break;
+        default:
+            break;
+    }
+
+    return 0;
+}
+
+#define ZIP_FULLPATH_MAX 512
+
+int extract7z(const char* inFile, const char* outPath, int tag, Extract7zCallback callback)
 {
     CFileInStream archiveStream;
     CLookToRead lookStream;
@@ -231,13 +261,16 @@ int extract7z(const char* inFile, const char* outPath)
     ISzAlloc allocTempImp;
     UInt16 *temp = NULL;
     size_t tempSize = 200;
+
+    if (callback == NULL)
+        callback = DefaultExtract7zCallback;
     
     LOGD("\n7z ANSI-C Decoder " MY_VERSION_COPYRIGHT_DATE "\n");
     
     temp = (UInt16 *)SzAlloc(NULL, tempSize * sizeof(temp[0]));
-    if (!temp)
+    if (NULL == temp)
     {
-        LOGE("SzAlloc failed");
+        callback(tag, 0.f, EXTRACT_STATE_ERROR, "SzAlloc: memory allocation failures");
         return 1;
     }
     
@@ -249,7 +282,7 @@ int extract7z(const char* inFile, const char* outPath)
     
     if (InFile_Open(&archiveStream.file, inFile))
     {
-        LOGE("can not open input file");
+        callback(tag, 0.f, EXTRACT_STATE_ERROR, "InFile_Open: can not open input file");
         return 1;
     }
     
@@ -264,11 +297,10 @@ int extract7z(const char* inFile, const char* outPath)
     SzArEx_Init(&db);
     
     res = SzArEx_Open(&db, &lookStream.s, &allocImp, &allocTempImp);
+    float percent = 0.f;
     
     if (res == SZ_OK)
     {
-        UInt32 i;
-        
         /*
          if you need cache, use these 3 variables.
          if you use external function, you can make these variable as static.
@@ -291,7 +323,7 @@ int extract7z(const char* inFile, const char* outPath)
         }
         char* targetDirEnd = &targetDirPath[targetDirPathLen];
         
-        for (i = 0; i < db.NumFiles; i++)
+        for (UInt32 i = 0; i < db.NumFiles; i++)
         {
             offset = 0;
             outSizeProcessed = 0;
@@ -314,22 +346,25 @@ int extract7z(const char* inFile, const char* outPath)
                                      &offset, &outSizeProcessed,
                                      &allocImp, &allocTempImp);
                 if (res != SZ_OK)
+                {
+                    callback(tag, percent, EXTRACT_STATE_ERROR, "SzArEx_Extract: can not extracts file from archive");
                     break;
+                }
             }
             
-            /*for (size_t j = 0; name[j] != 0; j++)
-             {
-             if (name[j] == '/')
-             {
-             name[j] = 0;
-             MyCreateDir(outPath, name);
-             name[j] = CHAR_PATH_SEPARATOR;
-             }
-             }*/
+            for (size_t j = 0; name[j] != 0; j++)
+            {
+                if (name[j] == '/')
+                {
+                    name[j] = 0;
+                    MyCreateDir(targetDirPath, targetDirEnd, name);
+                    name[j] = '/';
+                }
+            }
             
             if (OutFile_OpenUtf16(&outFile, targetDirPath, targetDirEnd, destPath))
             {
-                LOGE("can not open output file");
+                callback(tag, percent, EXTRACT_STATE_ERROR, "OutFile_OpenUtf16: can not open output file");
                 res = SZ_ERROR_FAIL;
                 break;
             }
@@ -338,17 +373,21 @@ int extract7z(const char* inFile, const char* outPath)
             
             if (File_Write(&outFile, outBuffer + offset, &processedSize) != 0 || processedSize != outSizeProcessed)
             {
-                LOGE("can not write output file");
+                callback(tag, percent, EXTRACT_STATE_ERROR, "File_Write: can not write output file");
                 res = SZ_ERROR_FAIL;
                 break;
             }
             
             if (File_Close(&outFile))
             {
-                LOGE("can not close output file");
+                callback(tag, percent, EXTRACT_STATE_ERROR, "File_Close: can not close output file");
                 res = SZ_ERROR_FAIL;
                 break;
             }
+
+            percent = 100.f * i / db.NumFiles;
+            if(callback(tag, percent, EXTRACT_STATE_EXTRACTING, ""))
+                break;
         }
         IAlloc_Free(&allocImp, outBuffer);
     }
@@ -360,39 +399,73 @@ int extract7z(const char* inFile, const char* outPath)
     
     if (res == SZ_OK)
     {
-        LOGD("\nEverything is Ok\n");
+        callback(tag, 100.f, EXTRACT_STATE_COMPLETED, "Everything is Ok");
         return 0;
     }
     
-    if (res == SZ_ERROR_UNSUPPORTED)
-        LOGE("decoder doesn't support this archive");
-    else if (res == SZ_ERROR_MEM)
-        LOGE("can not allocate memory");
-    else if (res == SZ_ERROR_CRC)
-        LOGE("CRC error");
-    else
-        LOGD("\nERROR #%d\n", res);
+    switch(res)
+    {
+        case SZ_ERROR_UNSUPPORTED:
+            callback(tag, percent, EXTRACT_STATE_ERROR, "decoder doesn't support this archive");
+            break;
+        case SZ_ERROR_MEM:
+            callback(tag, percent, EXTRACT_STATE_ERROR, "can not allocate memory");
+            break;
+        case SZ_ERROR_CRC:
+            callback(tag, percent, EXTRACT_STATE_ERROR, "CRC error");
+            break;
+        default:
+            callback(tag, percent, EXTRACT_STATE_ERROR, "File_Close: can not close output file");
+            break;
+    }
     
     return 1;
 }
 
+//==================================================================================================
 #if defined(ANDROID)
 #include <jni.h>
+#include "../JniHelper.h"
+
 extern "C"
 {
     JNIEXPORT jint JNI_OnLoad(JavaVM *vm, void *reserved)
     {
+        AndroidExtract7z::JniHelper::setJavaVM(vm);
+
         return JNI_VERSION_1_6;
     }
+
+    static int Extract7zCallbackJNI(int tag, float percent, ExtractState state, const char* message)
+    {
+        AndroidExtract7z::JniMethodInfo t;
+
+        if (AndroidExtract7z::JniHelper::getStaticMethodInfo(t, "Utils/SevenZipHelper", 
+            "Extract7zCallbackJNI", "(IFILjava/lang/String;)I")) {
+            jstring jmessage = t.env->NewStringUTF(message);
+            int ret = t.env->CallStaticIntMethod(t.classID, t.methodID, tag, percent, (int)state, jmessage);
+            t.env->DeleteLocalRef(jmessage);
+            t.env->DeleteLocalRef(t.classID);
+
+            return ret;
+        }
+
+        return 1;
+    }
     
-    jint Java_Utils_SevenZipHelper_extract7z(JNIEnv *env, jclass thiz, jstring archiveFilePath, jstring outPath)
+    void Java_Utils_SevenZipHelper_extract7z(JNIEnv *env, jclass thiz, 
+        jstring archiveFilePath, jstring outPath, jboolean listenEnabled, jint tag)
     {
         const char* cfilePath = (const char*)env->GetStringUTFChars(archiveFilePath, NULL);
         const char* coutPath = (const char*)env->GetStringUTFChars(outPath, NULL);
-        jint ret = extract7z(cfilePath, coutPath);
+
+        if(listenEnabled)
+            extract7z(cfilePath, coutPath, tag, Extract7zCallbackJNI);
+        else
+            extract7z(cfilePath, coutPath, tag, NULL);
+
         env->ReleaseStringUTFChars(archiveFilePath, cfilePath);
         env->ReleaseStringUTFChars(outPath, coutPath);
-        return ret;
     }
 }
 #endif

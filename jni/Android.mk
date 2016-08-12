@@ -24,7 +24,8 @@ LOCAL_SRC_FILES := ../7zAlloc.c \
                    ../Ppmd7Dec.c \
                    ../7zFile.c \
                    ../7zStream.c \
-                   ../Util/7z/7zMain.cpp
+                   ../Util/7z/7zMain.cpp \
+                   ../Util/JniHelper.cpp
 
 LOCAL_C_INCLUDES := $(LOCAL_PATH)/../
 
