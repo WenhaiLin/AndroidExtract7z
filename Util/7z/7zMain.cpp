@@ -453,19 +453,23 @@ extern "C"
         return 1;
     }
     
-    void Java_Utils_SevenZipHelper_extract7z(JNIEnv *env, jclass thiz, 
+    int Java_Utils_SevenZipHelper_extract7z(JNIEnv *env, jclass thiz, 
         jstring archiveFilePath, jstring outPath, jboolean listenEnabled, jint tag)
     {
+        int ret = 0;
+
         const char* cfilePath = (const char*)env->GetStringUTFChars(archiveFilePath, NULL);
         const char* coutPath = (const char*)env->GetStringUTFChars(outPath, NULL);
 
         if(listenEnabled)
-            extract7z(cfilePath, coutPath, tag, Extract7zCallbackJNI);
+            ret = extract7z(cfilePath, coutPath, tag, Extract7zCallbackJNI);
         else
-            extract7z(cfilePath, coutPath, tag, NULL);
+            ret = extract7z(cfilePath, coutPath, tag, NULL);
 
         env->ReleaseStringUTFChars(archiveFilePath, cfilePath);
         env->ReleaseStringUTFChars(outPath, coutPath);
+
+        return ret;
     }
 }
 #endif
